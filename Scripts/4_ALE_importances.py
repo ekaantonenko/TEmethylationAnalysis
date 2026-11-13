@@ -34,7 +34,7 @@ mode = args.mode
 # PARAMETERS
 RANDOM_STATE_TTsplit = 42
 RANDOM_STATE_model = 42
-OUT_PREFIX = f'../Tables_update/4_ALE/4_ALE_{mode}'
+OUT_PREFIX = f'../Results/4_ALE/4_ALE_{mode}'
 
 # Choosing the targets
 if mode == 'regression_flanks':

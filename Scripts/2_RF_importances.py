@@ -29,7 +29,7 @@ mode = args.mode
 
 # PARAMETERS
 SEEDS = list(range(10))
-OUT_PREFIX = f'../Tables_update/2_{mode}_RF_importances'
+OUT_PREFIX = f'../Results/2_{mode}_RF_importances'
 
 df_feature_importances_mean, df_feature_importances_std = [], []
 

@@ -38,7 +38,7 @@ RANDOM_STATE_KFold = 42
 RANDOM_STATE_model = 42
 RANDOM_STATE_Sample = 42
 SHAP_SAMPLE_FRAC = 1
-OUT_PREFIX = f'../Tables_update/3_SHAP/3_{mode}_SHAP_importances'
+OUT_PREFIX = f'../Results/3_SHAP/3_{mode}_SHAP_importances'
 
 df_shap_importances_mean, df_shap_importances_std = [], []
 

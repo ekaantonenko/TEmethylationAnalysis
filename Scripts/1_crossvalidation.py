@@ -53,7 +53,7 @@ data_filter = args.data_filter
 N_FOLDS = 10
 RANDOM_STATE_KFold = 42
 RANDOM_STATE_model = 42
-OUT_PREFIX = f'../Tables/1_{mode}_{modelname}_{data_filter}_CV'
+OUT_PREFIX = f'../Results/1_{mode}_{modelname}_{data_filter}_CV'
 
 
 # Defining the dictionaries

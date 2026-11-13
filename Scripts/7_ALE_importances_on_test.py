@@ -4,8 +4,7 @@ import argparse
 import pandas as pd
 import numpy as np
 
-import shap
-
+from PyALE import ale
 from sklearn.impute import SimpleImputer
 
 ### import local ###
@@ -18,7 +17,7 @@ from _best_params import best_params_regression_flanks, best_params_regression_T
 ########################################################################################
 
 # Parse command-line arguments
-parser = argparse.ArgumentParser(description="Run SHAP analysis of the Random Forest models on the new-cohort test set.")
+parser = argparse.ArgumentParser(description="Run ALE analysis of the Random Forest models on the new-cohort test set.")
 parser.add_argument(
     "--mode",
     type=str,
@@ -34,9 +33,7 @@ mode = args.mode
 
 # PARAMETERS
 RANDOM_STATE_model = 42
-RANDOM_STATE_Sample = 42
-SHAP_SAMPLE_FRAC = 1
-OUT_PATH = f'../Tables_update/6_SHAP/6_{mode}_SHAP_on_test.csv'
+OUT_DIR = '../Results/7_ALE/test'
 
 # Choosing the targets
 if mode == 'regression_flanks':
@@ -50,13 +47,10 @@ else:  # 'regression_TE' (argparse already restricts the choices)
 ### import data ###
 if mode == 'regression_TE':
     df_train = pd.read_csv('../Data/allTEs_upd_upd.csv')
-    df_test = pd.read_csv('../Data/200_allTEs_upd_upd.csv')
+    df_test  = pd.read_csv('../Data/200_allTEs_upd_upd.csv')
 else:
     df_train = pd.read_csv('../Data/allTEs_meth_upd_upd.csv')
-    df_test = pd.read_csv('../Data/200_allTEs_meth_upd_upd.csv')
-
-########################################################################################
-########################################################################################
+    df_test  = pd.read_csv('../Data/200_allTEs_meth_upd_upd.csv')
 
 # Test-set filtering: same as data_filter='all_nodup_unseen' in the new-cohort test script
 
@@ -68,32 +62,37 @@ common_genomes = [
     '9557','9564','9567','9568','9588','9593','9594','9600','9616','9745',
     '9759','9762','9796','9832','9879','9908','9937'
 ]
-
 df_test = df_test[~df_test['genome'].astype(str).isin(common_genomes)]
 
 # Keep only test TEs whose (family, 5' gene, 3' gene) combination is absent from the training set
-print('Test TEs before filtering:', len(df_test))
 df_test = df_test.merge(
     df_train[['TE.family', '5p.Gene1.id', '3p.Gene1.id']].drop_duplicates(),
     on=['TE.family', '5p.Gene1.id', '3p.Gene1.id'],
     how='left',
     indicator=True
 ).query('_merge == "left_only"').drop(columns='_merge')
-print('Test TEs after filtering:', len(df_test))
+
+os.makedirs(OUT_DIR, exist_ok=True)
 
 ########################################################################################
 ########################################################################################
 
-# Collect all results across targets into one long dataframe
-all_results = []
+def passthrough_encode(df):
+    # PyALE converts the feature to an ordered pd.Categorical of strings internally;
+    # turn it back into plain object dtype so the pipeline's OrdinalEncoder sees
+    # the same kind of values it was fitted on.
+    return df.astype(str).astype(object)
+
 
 for window_name, target_cols in windows_and_targets:
-
     for target_col in target_cols:
+        if not ('all' in target_col or 'TE' in target_col):
+            continue
 
         print(f"\n{'='*60}")
         print(f"Target: {target_col} | Window: {window_name}")
 
+        # --- Prepare train and test ---
         df_test_target = df_test.dropna(subset=[target_col])
 
         if window_name == 'TE':
@@ -106,7 +105,9 @@ for window_name, target_cols in windows_and_targets:
         X_train = X_train.drop(columns=['genome'])
         X_test = X_test.drop(columns=['genome'])
 
-        ### IMPUTATION OF MISSING VALUES IN _TEST_ (using statistics from _TRAIN_)
+        # --- Impute test using train statistics ---
+        # Note: ALE needs the original feature space (not preprocessor-transformed),
+        # so we impute X_test directly and pass it to ale() with the full pipeline
         num_cols = X_train.select_dtypes(include=[np.number]).columns
         cat_cols = X_train.select_dtypes(exclude=[np.number]).columns
         X_test[num_cols] = (
@@ -121,14 +122,15 @@ for window_name, target_cols in windows_and_targets:
                 .transform(X_test[cat_cols])
             )
 
-        print(f'Number of TRAIN samples for this target: {X_train.shape[0]}')
-        print(f'Number of TEST samples for this target: {X_test.shape[0]}')
-        print(f'Number of features for this target: {X_train.shape[1]}')
+        print(f"Train samples : {X_train.shape[0]}")
+        print(f"Test samples  : {X_test.shape[0]}")
+        print(f"Features      : {X_train.shape[1]}")
 
         if X_test.empty:
             print(f'  Skipping {window_name} / {target_col}: no test samples after filtering')
             continue
 
+        # --- Train model on full train set ---
         model = create_model(X_train,
                              mode=mode,
                              modelname='RF',
@@ -136,37 +138,53 @@ for window_name, target_cols in windows_and_targets:
         model.set_params(**best_params)
         model.fit(X_train, y_train)
 
-        # Transform test set for SHAP
-        X_test_transformed = model.named_steps['preprocessor'].transform(X_test)
-        feature_names = model.named_steps['preprocessor'].get_feature_names_out()
-        final_model = model.named_steps["regressor"]
+        # Global baseline: mean prediction over full training set
+        baseline = np.mean(model.predict(X_test))
 
-        # Sample subset of test data for speed [by default, SHAP_SAMPLE_FRAC=1]
-        X_test_sample = shap.utils.sample(
-            X_test_transformed,
-            int(len(X_test_transformed) * SHAP_SAMPLE_FRAC),
-            random_state=RANDOM_STATE_Sample
-        )
+        # Get numeric feature names from preprocessor
+        preprocessor = model.named_steps['preprocessor']
+        num_cols_for_model = preprocessor.named_transformers_['num'].get_feature_names_out()
 
-        explainer = shap.Explainer(final_model.predict, X_test_sample)
-        shap_values = explainer(X_test_sample)
+        for feature in X_test.columns:
 
-        # Mean and std of |SHAP| across test samples
-        abs_shap = np.abs(shap_values.values)
+            # Skip features with insufficient unique values for ALE
+            if X_test[feature].nunique() < 2:
+                print(f"    Skipping {feature}: <2 unique values in the test set.")
+                continue
 
-        all_results.append(pd.DataFrame({
-            'feature'       : feature_names,
-            'shap_mean_abs' : abs_shap.mean(axis=0),
-            'shap_std_abs'  : abs_shap.std(axis=0),
-            'target'        : target_col,
-            'window'        : window_name
-        }))
+            try:
+                if feature in num_cols_for_model:
+                    ale_res = ale(
+                        X=X_test,
+                        model=model,
+                        feature=[feature],
+                        include_CI=True,
+                        plot=False
+                    )
+                else:
+                    ale_res = ale(
+                        X=X_test,
+                        model=model,
+                        feature=[feature],
+                        feature_type='discrete',
+                        encode_fun=passthrough_encode,
+                        predictors=list(X_train.columns),
+                        include_CI=True,
+                        plot=False
+                    )
 
-########################################################################################
+                ale_res['effect_unscaled']  = baseline + ale_res['eff']
+                ale_res['ci_low_abs']       = baseline + ale_res['lowerCI_95%']
+                ale_res['ci_high_abs']      = baseline + ale_res['upperCI_95%']
+                ale_res['feature']          = feature
+                ale_res['target']           = target_col
+                ale_res['window']           = window_name
 
-out_df = pd.concat(all_results, axis=0, ignore_index=True)
+                out_path = os.path.join(OUT_DIR, f'ALE_{mode}_{window_name}_{target_col}_{feature}.csv')
+                ale_res.to_csv(out_path)
 
-os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-out_df.to_csv(OUT_PATH, index=False)
-print(f"\nSaved results to {OUT_PATH}")
-print(out_df.head(20).to_string(index=False))
+            except Exception as e:
+                print(f"    ALE failed for {feature}: {e}")
+                continue
+
+print("\nDone.")
